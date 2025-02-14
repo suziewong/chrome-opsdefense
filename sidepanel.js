@@ -1,20 +1,36 @@
 document.addEventListener('DOMContentLoaded', () => {
+  // 建立与background script的连接
+  const port = chrome.runtime.connect({ name: 'sidepanel' });
+
+  // 监听来自background script的消息
+  port.onMessage.addListener((message) => {
+    if (message.type === 'UPDATE_CONTENT') {
+      selectorInput.value = message.xpath;
+      contentDisplay.value = message.content;
+      showStatus('已自动更新选择器和内容', 'success');
+    }
+  });
+
   const collapseBtn = document.querySelector('.collapse-btn');
   const container = document.querySelector('.container');
   const checkButton = document.getElementById('checkButton');
   const ruleInput = document.getElementById('ruleInput');
   const statusMessage = document.getElementById('statusMessage');
+  const extractButton = document.getElementById('extractButton');
+  const selectorInput = document.getElementById('selectorInput');
+  const contentDisplay = document.getElementById('contentDisplay');
+  const selectorType = document.getElementById('selectorType');
 
   // 折叠/展开功能
   collapseBtn.addEventListener('click', () => {
     container.style.display = container.style.display === 'none' ? 'flex' : 'none';
   });
 
-  // 检查按钮点击事件
-  checkButton.addEventListener('click', async () => {
-    const rule = ruleInput.value.trim();
-    if (!rule) {
-      showStatus('请输入检查规则', 'error');
+  // 提取内容按钮点击事件
+  extractButton.addEventListener('click', async () => {
+    const selector = selectorInput.value.trim();
+    if (!selector) {
+      showStatus('请输入选择器', 'error');
       return;
     }
 
@@ -27,20 +43,85 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
       // 确保content script已注入
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        files: ['content.js']
-      });
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          files: ['content.js']
+        });
+      } catch (error) {
+        if (error.message.includes('Cannot access contents of url')) {
+          showStatus('无法在此页面执行内容提取', 'error');
+          return;
+        }
+      }
 
-      // 发送消息给content script进行内容检查
-      const response = await chrome.tabs.sendMessage(tab.id, {
-        action: 'checkContent',
-        rule: rule
-      });
+      // 添加重试机制
+      let retries = 3;
+      while (retries > 0) {
+        try {
+          const response = await chrome.tabs.sendMessage(tab.id, {
+            type: 'GET_ELEMENT_BY_XPATH',
+            xpath: selector
+          });
 
+          if (response.success) {
+            contentDisplay.value = response.content;
+            showStatus(`成功获取${response.elementType}元素的内容`, 'success');
+            return;
+          } else {
+            showStatus(response.error, 'error');
+            contentDisplay.value = '';
+            return;
+          }
+        } catch (error) {
+          retries--;
+          if (retries === 0) {
+            showStatus('内容提取失败，请确保页面已加载完成', 'error');
+            contentDisplay.value = '';
+            return;
+          }
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+      }
+    } catch (error) {
+      showStatus('内容提取失败：' + error.message, 'error');
+      contentDisplay.value = '';
+    }
+  });
 
-      if (response.violations) {
-        showStatus('发现违规内容！', 'error');
+  // 检查按钮点击事件
+  checkButton.addEventListener('click', async () => {
+    const rule = ruleInput.value.trim();
+    const content = contentDisplay.value.trim();
+
+    if (!rule) {
+      showStatus('请输入检查规则', 'error');
+      return;
+    }
+
+    if (!content) {
+      showStatus('请先提取需要检查的内容', 'error');
+      return;
+    }
+
+    try {
+      // 处理正则表达式
+      let regex;
+      try {
+        // 提取正则表达式的标志
+        const flags = rule.match(/\/([gimuy]*)$/)?.[1] || '';
+        // 提取正则表达式的模式部分
+        const pattern = rule.replace(/^\/|\/[gimuy]*$/g, '');
+        regex = new RegExp(pattern, flags);
+      } catch (e) {
+        showStatus('无效的正则表达式：' + e.message, 'error');
+        return;
+      }
+
+      // 检查内容是否匹配规则
+      const matches = content.match(regex);
+      if (matches) {
+        showStatus(`发现违规内容！找到 ${matches.length} 处匹配：${matches.join(', ')}`, 'error');
       } else {
         showStatus('未发现违规内容', 'success');
       }
